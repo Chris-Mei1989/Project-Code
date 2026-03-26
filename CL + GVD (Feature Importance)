@@ -1,0 +1,146 @@
+import pandas as pd
+import glob
+import os
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.multioutput import MultiOutputRegressor
+import lightgbm as lgb
+import optuna
+import time
+
+# -----------------------------
+# Settings
+# -----------------------------
+parent_folder = r"C:\Users\Administrator\Pictures\Unified Dataset"
+mode_folders = ['FundamentalMode', 'HOM1MachineLearning', 'HOM2MachineLearning', 'HOM3MachineLearning']
+required_columns = ['D_Core', 'd_out', 'd_out_in', 'd_in', 'd_in_in', 'Lamda', 'IMG', 'CL', 'GVD']
+
+mode_display_name = {
+    'FundamentalMode': 'LP01',
+    'HOM1MachineLearning': 'LP11',
+    'HOM2MachineLearning': 'LP21',
+    'HOM3MachineLearning': 'LP02'
+}
+
+models = {}
+scalers = {}
+
+feature_cols = ['D_Core', 'd_out', 'd_out_in', 'd_in', 'd_in_in', 'Lamda', 'IMG',
+                'V', 't1_Lamda', 't2_Lamda', 'Dcore_Lamda', 't1_Dcore', 't2_Dcore']
+
+target_cols = ['CL', 'GVD']  # Multi-output targets
+
+# -----------------------------
+# Load and clean data
+# -----------------------------
+def load_clean_data(folder):
+    files = glob.glob(os.path.join(folder, "Data*.xlsx"))
+    df_list = []
+    for file in files:
+        df = pd.read_excel(file)
+        df.columns = df.columns.str.strip().str.replace('\n','').str.replace('\r','')
+        df_list.append(df)
+    data = pd.concat(df_list, ignore_index=True)
+    data = data[[col for col in required_columns if col in data.columns]]
+    return data
+
+# -----------------------------
+# Add physics-aware features
+# -----------------------------
+def add_physics_features(df, n_core=1.45, n_clad=1.0):
+    df['a'] = df['D_Core'] / 2.0
+    df['V'] = 2 * np.pi * df['a'] / df['Lamda'] * np.sqrt(n_core**2 - n_clad**2)
+    df['t1'] = df['d_out'] - df['d_in']
+    df['t2'] = df['d_out_in'] - df['d_in_in']
+    df['t1_Lamda'] = df['t1'] / df['Lamda']
+    df['t2_Lamda'] = df['t2'] / df['Lamda']
+    df['Dcore_Lamda'] = df['D_Core'] / df['Lamda']
+    df['t1_Dcore'] = df['t1'] / df['D_Core']
+    df['t2_Dcore'] = df['t2'] / df['D_Core']
+    return df
+
+# -----------------------------
+# Train LightGBM multi-output
+# -----------------------------
+def train_mode_multioutput(X, y):
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.15, random_state=42)
+    
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+
+    def objective(trial):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'random_state': 42,
+            'verbosity': -1
+        }
+        base_model = lgb.LGBMRegressor(**params)
+        multi_model = MultiOutputRegressor(base_model)
+        multi_model.fit(X_train_scaled, y_train)
+        return 0  # We skip metrics as we only need the model
+
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=2, show_progress_bar=False)
+    best_params = study.best_params
+    best_params['verbosity'] = -1
+
+    final_base = lgb.LGBMRegressor(**best_params)
+    final_model = MultiOutputRegressor(final_base)
+    X_full_scaled = scaler.fit_transform(X)
+    final_model.fit(X_full_scaled, y)
+    
+    return final_model, scaler
+
+# -----------------------------
+# Train models for each mode
+# -----------------------------
+for mode in mode_folders:
+    folder_path = os.path.join(parent_folder, mode)
+    data = load_clean_data(folder_path)
+    data = add_physics_features(data)
+
+    if 'GVD' not in data.columns:
+        raise ValueError(f"GVD column missing for mode {mode}")
+
+    X = data[feature_cols]
+    y = data[target_cols]
+
+    model, scaler = train_mode_multioutput(X, y)
+    models[mode] = model
+    scalers[mode] = scaler
+
+# -----------------------------
+# Unified Feature Importance Analysis
+# -----------------------------
+importances_cl = []
+importances_gvd = []
+
+for mode in mode_folders:
+    model = models[mode]
+    lgb_cl = model.estimators_[0]
+    lgb_gvd = model.estimators_[1]
+    importances_cl.append(lgb_cl.feature_importances_)
+    importances_gvd.append(lgb_gvd.feature_importances_)
+
+importances_cl = np.array(importances_cl)
+importances_gvd = np.array(importances_gvd)
+
+mean_importance_cl = importances_cl.mean(axis=0)
+mean_importance_gvd = importances_gvd.mean(axis=0)
+mean_importance_unified = (mean_importance_cl + mean_importance_gvd) / 2
+
+feature_importance_df = pd.DataFrame({
+    'Feature': feature_cols,
+    'Importance_CL': mean_importance_cl,
+    'Importance_GVD': mean_importance_gvd,
+    'Importance_Unified': mean_importance_unified
+}).sort_values(by='Importance_Unified', ascending=False)
+
+print("\n📊 Unified Feature Importance Across CL and GVD:")
+print(feature_importance_df)
