@@ -1,0 +1,84 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+
+# --- Parameters ---
+algorithms = ["LGBM","RandomForest", "DecisionTree", "XGBoost", "CatBoost"]
+modes = ["FM", "HOM1", "HOM2", "HOM3"]
+
+# --- Load dataset ---
+desktop_path = os.path.join(os.path.expanduser("~"), "Desktop", "cube_dataset.xlsx")
+df_base = pd.read_excel(desktop_path)
+
+# --- Cube drawing function ---
+def draw_box(ax, x, y, w=3, h=2, d=0.6):
+    front = [(x, y), (x+w, y), (x+w, y+h), (x, y+h), (x, y)]
+    top = [(x, y+h), (x+d, y+h+d), (x+w+d, y+h+d), (x+w, y+h)]
+    side = [(x+w, y), (x+w+d, y+d), (x+w+d, y+h+d), (x+w, y+h)]
+    ax.plot(*zip(*front), color="black", linewidth=0.6)
+    ax.plot(*zip(*top), color="black", linewidth=0.6)
+    ax.plot(*zip(*side), color="black", linewidth=0.6)
+    return (x, y, w, h, d)
+
+# --- Continuous color mapping ---
+all_mses = df_base[[f"{mode}_{algo}" for algo in algorithms for mode in modes]].values.flatten()
+min_mse, max_mse = all_mses.min(), all_mses.max()
+
+cmap = cm.get_cmap("jet")   # continuous gradient
+norm = mcolors.Normalize(vmin=min_mse, vmax=max_mse)
+
+def mse_to_color(mse):
+    return cmap(norm(mse))
+
+# --- Draw grid ---
+def draw_grid(rows=len(algorithms), cols=len(modes), spacing_x=4, spacing_y=3, 
+              w=3, h=2, d=0.6, save_path=None, dpi=300):
+    fig, ax = plt.subplots(figsize=(16, 12))
+    ax.set_aspect("equal")
+    ax.axis("off")
+    margin = 0.05
+
+    for row_idx, algo in enumerate(algorithms):
+        for col_idx, mode in enumerate(modes):
+            bx, by, bw, bh, bd = draw_box(ax, col_idx*spacing_x, -row_idx*spacing_y, w, h, d)
+            cube_col = f"{mode}_{algo}"
+
+            for idx, row in df_base.iterrows():
+                lam = row["lambda"]
+                dout = row["dout"]
+                z = row["z"]
+                mse = row[cube_col]
+
+                px = bx + margin*bw + ((lam - df_base["lambda"].min()) / (df_base["lambda"].max()-df_base["lambda"].min())) * bw * (1 - 2*margin)
+                py = by + margin*bh + ((dout - df_base["dout"].min()) / (df_base["dout"].max()-df_base["dout"].min())) * bh * (1 - 2*margin)
+                offset = margin*bd + ((z - df_base["z"].min()) / (df_base["z"].max()-df_base["z"].min())) * bd * (1 - 2*margin)
+
+                ax.plot(px + offset, py + offset, "o", color=mse_to_color(mse), markersize=3.2)
+
+    # --- Continuous colorbar (aesthetic style) ---
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+
+    cbar = plt.colorbar(sm, ax=ax, fraction=0.02, pad=0.04)
+    cbar.set_label("MSE", fontsize=12)
+
+    # Tick formatting (7 evenly spaced ticks)
+    ticks = np.linspace(min_mse, max_mse, 7)
+    cbar.set_ticks(ticks)
+    cbar.ax.set_yticklabels([f"{t:.5f}" for t in ticks])
+
+    # Thinner ticks + nice frame
+    cbar.ax.tick_params(size=3, width=0.6, labelsize=9)
+
+    # --- Save or Show ---
+    if save_path:
+        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        print(f"Figure saved to {save_path} at {dpi} dpi")
+    else:
+        plt.show()
+
+# --- Run ---
+draw_grid(save_path=os.path.join(os.path.expanduser("~"), "Desktop", "cube_plot.png"), dpi=300)
